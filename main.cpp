@@ -990,6 +990,11 @@ int add_user(const std::string& cur_username, const std::string& username,
         return 0;
     }
 
+    // Check if cur_user is empty (shouldn't happen for non-first user)
+    if (cur_username.empty()) {
+        return -1;
+    }
+
     // Check if cur_user is logged in
     if (loggedInUsers.find(cur_username) == loggedInUsers.end()) {
         return -1;
