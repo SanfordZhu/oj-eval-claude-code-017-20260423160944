@@ -1,4 +1,0 @@
-add_user -c root -u admin -p password123 -n 张三 -m admin@example.com -g 10
-login -u admin -p password123
-query_profile -c admin -u admin
-exit
