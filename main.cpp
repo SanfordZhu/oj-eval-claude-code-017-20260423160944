@@ -91,6 +91,15 @@ const char* USER_FILE = "users.dat";
 const char* TRAIN_FILE = "trains.dat";
 const char* ORDER_FILE = "orders.dat";
 
+// Helper structures
+struct TrainInfo {
+    std::string trainID;
+    std::string departureTime;
+    std::string arrivalTime;
+    int price;
+    int seats;
+};
+
 // Function declarations
 void loadData();
 void saveData();
@@ -134,6 +143,9 @@ int calculatePrice(const Train& train, int fromIndex, int toIndex);
 std::pair<std::string, std::string> calculateTrainTime(const Train& train,
                                                        const std::string& date,
                                                        int fromIndex, int toIndex);
+std::vector<std::string> getAllStations();
+std::vector<TrainInfo> findTrainsBetween(const std::string& from, const std::string& to, const std::string& date);
+TrainInfo getTrainInfo(const std::string& trainID, const std::string& from, const std::string& to, const std::string& date);
 
 std::map<std::string, std::string> parseCommandLine(const std::string& line) {
     std::map<std::string, std::string> params;
@@ -636,8 +648,76 @@ std::string query_ticket(const std::string& from, const std::string& to,
 
 std::string query_transfer(const std::string& from, const std::string& to,
                           const std::string& date, const std::string& sort_by) {
-    // Simplified implementation - would need proper transfer logic
-    return "0";
+    // Find all possible transfer combinations
+    std::vector<std::tuple<TrainInfo, TrainInfo, std::string>> transfers; // train1, train2, transferStation
+
+    // For each possible transfer station
+    for (const auto& transferStation : getAllStations()) {
+        if (transferStation == from || transferStation == to) continue;
+
+        // Find trains from 'from' to transfer station
+        auto trains1 = findTrainsBetween(from, transferStation, date);
+        if (trains1.empty()) continue;
+
+        // Find trains from transfer station to 'to'
+        auto trains2 = findTrainsBetween(transferStation, to, date);
+        if (trains2.empty()) continue;
+
+        // Combine the best options
+        for (const auto& t1 : trains1) {
+            for (const auto& t2 : trains2) {
+                // Ensure we can make the connection (t2 departs after t1 arrives)
+                if (t1.arrivalTime < t2.departureTime) {
+                    transfers.push_back({t1, t2, transferStation});
+                }
+            }
+        }
+    }
+
+    if (transfers.empty()) {
+        return "0";
+    }
+
+    // Sort by the requested criteria
+    if (sort_by == "time") {
+        std::sort(transfers.begin(), transfers.end(),
+            [](const auto& a, const auto& b) {
+                int timeA = dateToDays(std::get<0>(a).arrivalTime.substr(0, 5)) * 1440 + timeToMinutes(std::get<0>(a).arrivalTime.substr(6));
+                int timeB = dateToDays(std::get<0>(b).arrivalTime.substr(0, 5)) * 1440 + timeToMinutes(std::get<0>(b).arrivalTime.substr(6));
+                int depA = dateToDays(std::get<1>(a).departureTime.substr(0, 5)) * 1440 + timeToMinutes(std::get<1>(a).departureTime.substr(6));
+                int depB = dateToDays(std::get<1>(b).departureTime.substr(0, 5)) * 1440 + timeToMinutes(std::get<1>(b).departureTime.substr(6));
+                int totalA = depA - timeA;
+                int totalB = depB - timeB;
+
+                if (totalA != totalB) return totalA < totalB;
+                return std::get<0>(a).trainID < std::get<0>(b).trainID;
+            });
+    } else {
+        std::sort(transfers.begin(), transfers.end(),
+            [](const auto& a, const auto& b) {
+                int priceA = std::get<0>(a).price + std::get<1>(a).price;
+                int priceB = std::get<0>(b).price + std::get<1>(b).price;
+                if (priceA != priceB) return priceA < priceB;
+                return std::get<0>(a).trainID < std::get<0>(b).trainID;
+            });
+    }
+
+    // Return the best transfer
+    const auto& best = transfers[0];
+    const auto& t1 = std::get<0>(best);
+    const auto& t2 = std::get<1>(best);
+    const auto& transferStation = std::get<2>(best);
+
+    // Format the output
+    std::string result;
+    result += t1.trainID + " " + from + " " + t1.departureTime + " -> " +
+              transferStation + " " + t1.arrivalTime + " " + std::to_string(t1.price) + " " +
+              std::to_string(t1.seats) + "\n";
+    result += t2.trainID + " " + transferStation + " " + t2.departureTime + " -> " +
+              to + " " + t2.arrivalTime + " " + std::to_string(t2.price) + " " +
+              std::to_string(t2.seats) + "\n";
+
+    return result;
 }
 
 int buy_ticket(const std::string& username, const std::string& trainID,
@@ -886,6 +966,92 @@ std::pair<std::string, std::string> calculateTrainTime(const Train& train,
     std::string arrivingTime = daysToDate(currentDate) + " " + minutesToTime(currentTime);
 
     return {leavingTime, arrivingTime};
+}
+
+std::vector<std::string> getAllStations() {
+    std::set<std::string> stationSet;
+    for (const auto& pair : trains) {
+        const Train& train = pair.second;
+        for (int i = 0; i < train.stationNum; i++) {
+            stationSet.insert(train.stations[i]);
+        }
+    }
+    return std::vector<std::string>(stationSet.begin(), stationSet.end());
+}
+
+std::vector<TrainInfo> findTrainsBetween(const std::string& from, const std::string& to, const std::string& date) {
+    std::vector<TrainInfo> results;
+
+    for (const auto& pair : trains) {
+        const Train& train = pair.second;
+        if (!train.released) continue;
+
+        // Find from and to stations
+        int fromIndex = -1, toIndex = -1;
+        for (int i = 0; i < train.stationNum; i++) {
+            if (train.stations[i] == from) fromIndex = i;
+            if (train.stations[i] == to) toIndex = i;
+        }
+
+        if (fromIndex == -1 || toIndex == -1 || fromIndex >= toIndex) continue;
+
+        // Check if train runs on this date
+        int queryDate = dateToDays(date);
+        int saleStart = dateToDays(train.saleDate[0]);
+        int saleEnd = dateToDays(train.saleDate[1]);
+
+        // Calculate departure date from starting station
+        int departureDate = queryDate - fromIndex;
+        if (departureDate < saleStart || departureDate > saleEnd) continue;
+
+        // Calculate times and price
+        auto [leavingTime, arrivingTime] = calculateTrainTime(train, date, fromIndex, toIndex);
+        int price = calculatePrice(train, fromIndex, toIndex);
+
+        TrainInfo info;
+        info.trainID = train.trainID;
+        info.departureTime = leavingTime;
+        info.arrivalTime = arrivingTime;
+        info.price = price;
+        info.seats = train.seatNum;
+
+        results.push_back(info);
+    }
+
+    return results;
+}
+
+TrainInfo getTrainInfo(const std::string& trainID, const std::string& from, const std::string& to, const std::string& date) {
+    TrainInfo info;
+    info.trainID = trainID;
+
+    if (trains.find(trainID) == trains.end()) {
+        return info;
+    }
+
+    const Train& train = trains[trainID];
+
+    // Find from and to stations
+    int fromIndex = -1, toIndex = -1;
+    for (int i = 0; i < train.stationNum; i++) {
+        if (train.stations[i] == from) fromIndex = i;
+        if (train.stations[i] == to) toIndex = i;
+    }
+
+    if (fromIndex == -1 || toIndex == -1 || fromIndex >= toIndex) {
+        return info;
+    }
+
+    // Calculate times and price
+    auto [leavingTime, arrivingTime] = calculateTrainTime(train, date, fromIndex, toIndex);
+    int price = calculatePrice(train, fromIndex, toIndex);
+
+    info.departureTime = leavingTime;
+    info.arrivalTime = arrivingTime;
+    info.price = price;
+    info.seats = train.seatNum;
+
+    return info;
 }
 
 void loadData() {
